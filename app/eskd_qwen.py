@@ -23,6 +23,8 @@ from pypdf import PdfReader, PdfWriter
 HERE = Path(__file__).resolve().parent
 API = "http://127.0.0.1:11434"
 HTTP = request.build_opener(request.ProxyHandler({}))
+# Bump when page recognition changes. The initial value preserves existing registries.
+RECOGNITION_REVISION = "a4f84dd3984cc3a933541c0b6d7855ca0a6d3455cc4f7dd2775502275cc041f5"
 FIELDS = ("designation", "sheet", "total")
 STATES = ["read", "blank", "absent", "unreadable", "ambiguous"]
 BLOCKS = ["full_drawing", "short", "specification", "other", "unclear",
@@ -157,7 +159,7 @@ def scan(db, job, a, client=None, progress=print):
         if not selected:
             raise ValueError(f"Модель отсутствует в Ollama. Выполните ollama pull {a.model}")
         backend = selected["digest"]
-    signature = digest((prompt + backend + str(a.tesseract) + digest(Path(__file__).read_bytes())).encode())
+    signature = digest((prompt + backend + str(a.tesseract) + RECOGNITION_REVISION).encode())
     paths = inventory(root)
     config(db, "complete", "0")
     config(db, "root", str(root))
@@ -225,10 +227,12 @@ def analyse(db):
             reasons = []
             if p["problem"]:
                 reasons.append(p["problem"])
-            if raw.get("block") not in ("full_drawing", "short"):
-                reasons.append("Тип штампа требует проверки")
-            if raw.get("sheet", {}).get("state") == "blank" and qty == 1 and raw.get("block") == "full_drawing":
+            block = raw.get("block")
+            if (block in ("full_drawing", "specification") and qty == 1
+                    and raw.get("sheet", {}).get("state") == "blank"):
                 sheet = 1
+            elif block not in ("full_drawing", "short"):
+                reasons.append("Тип штампа требует проверки")
             if not d or d != name:
                 reasons.append("Обозначение расходится с именем или не прочитано")
             if not sheet or (sheet == 1 and not qty):

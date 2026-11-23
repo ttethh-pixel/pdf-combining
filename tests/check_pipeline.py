@@ -32,10 +32,10 @@ class Endpoint(BaseHTTPRequestHandler):
         if len(msg["images"])==1:
             result = {"found":True,"box":[0,0,1000,1000],"clockwise":0}
         else:
-            n, qty, name = self.server.queue.pop(0)
+            n, qty, name, block = self.server.queue.pop(0)
             def val(x):
                 return {"raw":str(x) if x else None, "state":"read" if x else "absent"}
-            result = dict(block="full_drawing" if qty else "short",designation=val(name),
+            result = dict(block=block,designation=val(name),
                           sheet=val(n),total=val(qty),note="")
             if not n:
                 result["sheet"]["state"]="blank"
@@ -59,20 +59,37 @@ with tempfile.TemporaryDirectory() as temp:
             app.main()
     drawing(src/"AB.001.pdf",[1])
     drawing(src/"AB.001(3).pdf",[2])
+    Image.new("RGB",(300,200),"white").save(src/"CD.003.pdf")
+    Image.new("RGB",(300,200),"white").save(src/"EF.004.pdf")
     Image.new("RGB",(300,200),"white").save(src/"ББ.002.pdf")
-    server.queue=[(2,None,"AB.001"),(1,4,"AB.001"),(None,1,"ББ.002")]
+    server.queue=[
+        (2,None,"AB.001","short"),
+        (1,4,"AB.001","full_drawing"),
+        (None,1,"CD.003","specification"),
+        (None,2,"EF.004","specification"),
+        (None,1,"ББ.002","full_drawing"),
+    ]
     cmd("scan","--source",str(src))
     import csv
     def read(name):
         with (job/(name+".csv")).open(encoding="utf-8-sig") as f:
             return list(csv.DictReader(f,delimiter=";"))
-    pid=next(r["ID"] for r in read("Страницы") if "(3)" in r["Файл"])
+    pages=read("Страницы")
+    pid=next(r["ID"] for r in pages if "(3)" in r["Файл"])
+    spec=next(r for r in pages if r["Из имени"]=="CD.003")
+    assert spec["Графа 7"]=="" and spec["Принятый лист"]=="1"
+    assert spec["Замечания распознавания"]==""
+    ambiguous_spec=next(r for r in pages if r["Из имени"]=="EF.004")
+    assert ambiguous_spec["Принятый лист"]=="" and ambiguous_spec["Замечания распознавания"]
     assert read("Комплекты")[0]["Пропуски до известной границы"]=="3, 4"
     cmd("merge","--yes")
-    assert len(list(job.rglob("*.pdf")))==1
+    assembled=list(job.rglob("*.pdf"))
+    assert len(assembled)==2
+    assert any("ББ.002" in path.name for path in assembled)
+    assert len(PdfReader(next(path for path in assembled if "CD.003" in path.name)).pages)==1
     cmd("review","--id",pid,answers=["д","","","","Проверено по штампу"])
     drawing(src/"more"/"AB.001.pdf",[3,4])
-    server.queue=[(3,None,"AB.001"),(4,None,"AB.001")]
+    server.queue=[(3,None,"AB.001","short"),(4,None,"AB.001","short")]
     cmd("scan","--source",str(src))
     assert not server.queue
     cmd("scan","--source",str(src))
@@ -87,5 +104,5 @@ with tempfile.TemporaryDirectory() as temp:
     else:
         raise AssertionError("stale source accepted")
     server.shutdown()
-print("PASS: scanned / vector, missing, suffix mismatch, single blank, review, resume, multipage, order, stale hash")
+print("PASS: scanned / vector, missing, suffix mismatch, blank sheet in drawings and specifications, review, resume, multipage, order, stale hash")
 

@@ -26,6 +26,16 @@ PROVIDERS = {
     "OpenAI API": ("https://api.openai.com/v1", ""),
     "Другой OpenAI-совместимый API": ("", ""),
 }
+BULK_CONFIRMATION = "Подтверждено в списке страниц"
+
+
+def valid_page_fields(designation, sheet, total):
+    return bool(designation and designation.strip() and sheet
+                and (sheet != 1 or total) and (not total or sheet <= total))
+
+
+def can_confirm(row):
+    return bool(row["id"] and not row["decision"] and valid_page_fields(row["d"], row["sheet"], row["qty"]))
 
 
 class NoRedirect(request.HTTPRedirectHandler):
@@ -99,8 +109,9 @@ def session(out):
             yield db,job
 
 
-def publish(db, job, out, log):
-    root=core.verify_inventory(db)
+def publish(db, job, out, log, *, root=None):
+    if root is None:
+        root = core.verify_inventory(db)
     rows,plans=core.report(db,job)
     index=json.loads(core.config(db,"published") or "{}")
     archived=job/"предыдущие"/(time.strftime("%Y%m%d-%H%M%S")+"-"+uuid.uuid4().hex[:6])
@@ -183,6 +194,8 @@ class App:
         self.events=queue.Queue()
         self.busy=False
         self.controls=[]
+        self.checked = set()
+        self.confirmable = set()
         self.settings=Path(os.environ.get("LOCALAPPDATA",str(Path.home())))/"EskdDrawingReview"/"settings.json"
         try:
             saved=json.loads(self.settings.read_text(encoding="utf-8"))
@@ -219,17 +232,26 @@ class App:
             w.pack(side="left",padx=(0,6))
             self.controls.append((w,"normal"))
         ttk.Label(top,text="Страницы для проверки · двойной щелчок открывает карточку").pack(anchor="w",pady=(8,3))
+        review_actions = ttk.Frame(top)
+        review_actions.pack(fill="x")
         self.show_all=tk.BooleanVar()
-        ttk.Checkbutton(top,text="Показать все страницы",variable=self.show_all,command=self.display).pack(anchor="w")
+        ttk.Checkbutton(review_actions,text="Показать все страницы",variable=self.show_all,command=self.display).pack(side="left")
+        self.confirm_button = ttk.Button(review_actions, text="Подтвердить отмеченные",
+                                         command=lambda: self.safe(self.confirm_checked), state="disabled")
+        self.confirm_button.pack(side="left", padx=10)
         frame=ttk.Frame(top);frame.pack(fill="both",expand=True)
-        self.tree=ttk.Treeview(frame,columns=("path","page","d","n","why"),show="headings",selectmode="browse")
-        for k,title,width in [("path","Исходный файл",200),("page","Стр.",40),("d","Обозначение",160),("n","Лист",40),("why","Состояние",290)]:
+        self.tree=ttk.Treeview(frame,columns=("check","path","page","d","n","total","why"),show="headings",selectmode="browse")
+        for k,title,width in [("check","✓",35),("path","Исходный файл",200),("page","Стр.",40),("d","Обозначение",145),
+                              ("n","Лист",40),("total","Листов",55),("why","Состояние",270)]:
             self.tree.heading(k,text=title)
             self.tree.column(k,width=width,minwidth=30)
+        self.tree.column("check", anchor="center", stretch=False)
         bar=ttk.Scrollbar(frame,command=self.tree.yview)
         self.tree.configure(yscrollcommand=bar.set)
         bar.pack(side="right",fill="y");self.tree.pack(fill="both",expand=True)
-        self.tree.bind("<Double-1>",lambda e:self.safe(self.card))
+        self.tree.bind("<Button-1>", self.click_checkbox)
+        self.tree.bind("<space>", self.toggle_focused)
+        self.tree.bind("<Double-1>", self.open_card)
         self.status=tk.StringVar(value="Выберите папки и проверьте подключение.")
         ttk.Label(top,textvariable=self.status,wraplength=850).pack(anchor="w",pady=7)
         self.rows=[];self.plans={};self.loaded=None
@@ -269,6 +291,7 @@ class App:
         if self.busy:return
         self.busy=True
         for w,_ in self.controls:w.configure(state="disabled")
+        self.update_confirm_button()
         def worker():
             try: self.events.put(("done",fn()))
             except Exception as exc:self.events.put(("error",str(exc)))
@@ -282,11 +305,14 @@ class App:
                     self.status.set(val);continue
                 self.busy=False
                 for w,state in self.controls:w.configure(state=state)
+                self.update_confirm_button()
                 if kind=="error":
                     self.status.set("Ошибка: "+val)
                     messagebox.showerror("Чертежи ЕСКД",val,parent=self.win)
                 else:
                     if isinstance(val,tuple):
+                        if self.loaded != val[0]:
+                            self.checked.clear()
                         self.loaded,self.rows,self.plans=val
                         self.display()
                         self.status.set(f"Страниц и ошибок открытия: {len(self.rows)}. Комплектов: {len(self.plans)}. Подробности в Отчёт.txt.")
@@ -331,15 +357,83 @@ class App:
                 raise ValueError("Прерванное сканирование нужно продолжить кнопкой обработки.")
             self.loaded=out
             self.rows,self.plans=core.analyse(db)
+        self.checked.clear()
         self.display()
 
     def display(self):
         self.tree.delete(*self.tree.get_children())
         conflicts={r["id"]: ", ".join(p["errors"]) for p in self.plans.values() if p["errors"] for r in p["rows"]}
+        self.confirmable = {r["id"] for r in self.rows if r["id"] in conflicts and can_confirm(r)}
+        self.checked.intersection_update(self.confirmable)
         for i,r in enumerate(self.rows):
             if not self.show_all.get() and r["id"] not in conflicts:continue
             why="; ".join(r["reasons"]) or conflicts.get(r["id"]) or r["comment"] or "Сверено"
-            self.tree.insert("","end",iid=str(i),values=(r["path"],r["n"],r["d"] or "—",r["sheet"] or "—",why))
+            mark = "✓" if r["decision"] == "accept" else ""
+            if r["id"] in self.confirmable:
+                mark = "☑" if r["id"] in self.checked else "☐"
+            self.tree.insert("","end",iid=str(i),
+                             values=(mark,r["path"],r["n"],r["d"] or "—",r["sheet"] or "—",r["qty"] or "—",why))
+        self.update_confirm_button()
+
+    def click_checkbox(self, event):
+        if self.tree.identify_column(event.x) == "#1":
+            self.toggle_checkbox(self.tree.identify_row(event.y))
+
+    def toggle_focused(self, _event):
+        self.toggle_checkbox(self.tree.focus())
+        return "break"
+
+    def open_card(self, event):
+        if self.tree.identify_column(event.x) != "#1" and self.tree.identify_row(event.y):
+            self.safe(self.card)
+
+    def toggle_checkbox(self, item):
+        if self.busy or not item:
+            return
+        page_id = self.rows[int(item)]["id"]
+        if page_id not in self.confirmable:
+            return
+        self.checked.symmetric_difference_update({page_id})
+        self.tree.set(item, "check", "☑" if page_id in self.checked else "☐")
+        self.update_confirm_button()
+
+    def update_confirm_button(self):
+        self.confirm_button.configure(state="normal" if self.checked and not self.busy else "disabled")
+
+    def confirm_checked(self):
+        if self.busy or not self.checked:
+            return
+        out = self.loaded
+        selected = {r["id"]: r for r in self.rows if r["id"] in self.checked}
+        self.status.set("Подтверждаются отмеченные страницы…")
+
+        def work():
+            with session(out) as (db, job):
+                if core.config(db, "complete") != "1":
+                    raise ValueError("Сканирование прервано. Повторите обработку.")
+                root = core.verify_inventory(db)
+                rows, _ = core.analyse(db)
+                current = {r["id"]: r for r in rows if r["id"] in selected}
+                stale = "Отмеченные страницы изменились. Откройте реестр заново."
+                if current.keys() != selected.keys():
+                    raise ValueError(stale)
+                updates = []
+                for page_id, previous in selected.items():
+                    row = current[page_id]
+                    fields = (row["d"], row["sheet"], row["qty"])
+                    previous_fields = (previous["d"], previous["sheet"], previous["qty"])
+                    if fields != previous_fields or row["original"] != previous["original"]:
+                        raise ValueError(stale)
+                    if row["decision"] == "accept" and row["comment"] == BULK_CONFIRMATION:
+                        continue
+                    if not can_confirm(row):
+                        raise ValueError(stale)
+                    updates.append((json.dumps(fields, ensure_ascii=False), BULK_CONFIRMATION, page_id))
+                with db:
+                    db.executemany("UPDATE pages SET decision='accept', edited=?, comment=? WHERE id=?", updates)
+                return out, *publish(db, job, out, self.log, root=root)
+
+        self.start(work)
 
     def card(self):
         if self.busy or not self.tree.selection():return
@@ -364,7 +458,7 @@ class App:
         def decide(skip):
             d,s,q,why=(v.get().strip() for v in fields)
             n,total=core.number(s),core.number(q)
-            if not why or (not skip and (not d or not n or (q and not total) or (n==1 and not total) or (total and n>total))):
+            if not why or (not skip and ((q and not total) or not valid_page_fields(d,n,total))):
                 raise ValueError("Проверьте реквизиты и укажите основание решения.")
             with session(out) as (db,_):
                 db.execute("UPDATE pages SET decision=?,edited=?,comment=? WHERE id=?",
