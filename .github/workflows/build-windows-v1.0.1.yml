@@ -39,7 +39,7 @@ jobs:
           $archive = Get-ChildItem dist -Filter *.zip
           if (@($archive).Count -ne 1) { throw 'Expected one Windows archive' }
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath build/unpacked
-          .\build\unpacked\runtime\python.exe -E -s tests/check_portable.py
+          .\build\unpacked\runtime\python.exe -E -s -X utf8 tests/check_portable.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Move-Item -LiteralPath $archive.FullName -Destination dist/ESKD-Windows-x64.zip
       - name: Publish verified release
