@@ -1,0 +1,61 @@
+name: Build Windows release v1.0.1
+on:
+  push:
+    branches: [codex/windows-release-v1.0.1]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      SOURCE_SHA: c3b45c03e60bc1894c45a995bae991b2898ad783
+      RELEASE_TAG: v1.0.1
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c3b45c03e60bc1894c45a995bae991b2898ad783
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install dependencies and test PDF pipeline
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt reportlab
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          .\.venv\Scripts\python.exe tests/check_pipeline.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build Windows zip and test portable runtime
+        run: |
+          .\tools\build.ps1 -Python .\.venv\Scripts\python.exe
+          $archive = Get-ChildItem dist -Filter *.zip
+          if (@($archive).Count -ne 1) { throw 'Expected one Windows archive' }
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath build/unpacked
+          .\build\unpacked\runtime\python.exe -E -s tests/check_portable.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Move-Item -LiteralPath $archive.FullName -Destination dist/ESKD-Windows-x64.zip
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = 'dist/ESKD-Windows-x64.zip'
+          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $notes = @'
+          - Однолистовая спецификация собирается автоматически, если графа «Лист» пуста, а в «Листов» указано 1.
+          - В списке страниц для проверки можно отметить несколько строк и нажать «Подтвердить отмеченные». Полные комплекты собираются после подтверждения.
+          
+          Распакуйте архив целиком и запустите **Чертежи ЕСКД.exe**.
+          '@
+          Set-Content -LiteralPath release-notes.md -Value ($notes + "`n`nSHA-256 архива Windows " + $hash + ".") -Encoding utf8
+          gh release create $env:RELEASE_TAG $asset --target $env:SOURCE_SHA --title "Чертежи ЕСКД 1.0.1 для Windows x64" --notes-file release-notes.md --draft
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
