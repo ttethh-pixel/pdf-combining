@@ -110,6 +110,8 @@ def session(out):
 
 
 def publish(db, job, out, log, *, root=None):
+    if core.config(db, "complete") != "1":
+        raise ValueError("Сканирование прервано. Продолжите обработку.")
     if root is None:
         root = core.verify_inventory(db)
     rows,plans=core.report(db,job)
@@ -161,6 +163,7 @@ def publish(db, job, out, log, *, root=None):
                     index[d]=dict(name=dest.name,hash=core.digest(dest.read_bytes()),signature=signature)
                     core.config(db,"published",json.dumps(index))
                     db.commit()
+                p["output"] = dest.name
                 status="СОШЛОСЬ. Все листы проверены и собраны: "+dest.name
             except Exception as exc:
                 status="ОШИБКА СБОРКИ: "+str(exc)
@@ -209,6 +212,7 @@ class App:
         form=ttk.Frame(top)
         form.pack(fill="x")
         form.columnconfigure(1,weight=1)
+        windows = window.tk.call("tk", "windowingsystem") == "win32"
         for i,(k,title) in enumerate([("source","Исходные PDF"),("out","Папка вывода"),("provider","Провайдер"),
                                       ("url","Базовый URL API"),("model","Модель"),("key","Ключ API")]):
             ttk.Label(form,text=title).grid(row=i,column=0,sticky="w",padx=(0,12),pady=3)
@@ -223,11 +227,18 @@ class App:
                 b=ttk.Button(form,text="Обзор…",command=lambda k=k:self.pick(k))
                 b.grid(row=i,column=2,padx=5)
                 self.controls.append((b,"normal"))
+            elif k in ("url", "key"):
+                if windows:
+                    w.bind("<Control-KeyPress>", self.paste_shortcut)
+                b = ttk.Button(form, text="Вставить", command=lambda entry=w: self.paste_field(entry))
+                b.grid(row=i, column=2, padx=5)
+                self.controls.append((b, "normal"))
         ttk.Label(top,text="На указанный API передаются обзор страницы и фрагмент штампа. Ключ хранится в памяти до закрытия.").pack(anchor="w",pady=5)
         actions=ttk.Frame(top)
         actions.pack(fill="x",pady=6)
         for label,func in [("Проверить API",self.test),("Обработать и сшить",self.run),
-                           ("Открыть реестр",self.load),("Открыть результат",self.open_out)]:
+                           ("Открыть реестр",self.load),("Сшить из реестра",self.build_from_registry),
+                           ("Открыть результат",self.open_out)]:
             w=ttk.Button(actions,text=label,command=lambda f=func:self.safe(f))
             w.pack(side="left",padx=(0,6))
             self.controls.append((w,"normal"))
@@ -276,6 +287,20 @@ class App:
         p=filedialog.askdirectory(title="Выберите папку")
         if p:self.v[k].set(p)
 
+    @staticmethod
+    def paste_field(entry):
+        entry.focus_set()
+        entry.selection_range(0, "end")
+        entry.event_generate("<<Paste>>")
+
+    @staticmethod
+    def paste_shortcut(event):
+        # Tk 8.6 on Windows reports a layout-dependent keysym but a Windows virtual key code.
+        alt_mask = 1 << 17
+        if event.keycode == ord("V") and not event.state & alt_mask:
+            event.widget.event_generate("<<Paste>>")
+            return "break"
+
     def paths(self):
         if not self.v["out"].get().strip():
             raise ValueError("Выберите отдельную папку вывода.")
@@ -315,7 +340,11 @@ class App:
                             self.checked.clear()
                         self.loaded,self.rows,self.plans=val
                         self.display()
-                        self.status.set(f"Страниц и ошибок открытия: {len(self.rows)}. Комплектов: {len(self.plans)}. Подробности в Отчёт.txt.")
+                        outputs = [plan["output"] for plan in self.plans.values() if "output" in plan]
+                        status = f"Готовых PDF — {len(outputs)} из {len(self.plans)}."
+                        if len(outputs) == 1:
+                            status += f" Сохранён {outputs[0]}."
+                        self.status.set(status + " Подробности в Отчёт.txt.")
                     else:self.status.set(val)
         except queue.Empty:pass
         self.win.after(100,self.poll)
@@ -348,10 +377,14 @@ class App:
     def log(self,text):
         self.events.put(("log",text))
 
-    def load(self):
+    def registry_output(self):
         out=self.paths()
         if not (out/".eskd"/"реестр.sqlite").is_file():
             raise ValueError("В этой папке ещё нет реестра.")
+        return out
+
+    def load(self):
+        out = self.registry_output()
         with session(out) as (db,_):
             if core.config(db,"complete")!="1":
                 raise ValueError("Прерванное сканирование нужно продолжить кнопкой обработки.")
@@ -359,6 +392,16 @@ class App:
             self.rows,self.plans=core.analyse(db)
         self.checked.clear()
         self.display()
+
+    def build_from_registry(self):
+        out = self.registry_output()
+        self.status.set("Собираются PDF из сохранённого реестра…")
+
+        def work():
+            with session(out) as (db, job):
+                return out, *publish(db, job, out, self.log)
+
+        self.start(work)
 
     def display(self):
         self.tree.delete(*self.tree.get_children())

@@ -231,8 +231,6 @@ def analyse(db):
             if (block in ("full_drawing", "specification") and qty == 1
                     and raw.get("sheet", {}).get("state") == "blank"):
                 sheet = 1
-            elif block not in ("full_drawing", "short"):
-                reasons.append("Тип штампа требует проверки")
             if not d or d != name:
                 reasons.append("Обозначение расходится с именем или не прочитано")
             if not sheet or (sheet == 1 and not qty):

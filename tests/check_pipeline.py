@@ -41,11 +41,11 @@ class Endpoint(BaseHTTPRequestHandler):
                 result["sheet"]["state"]="blank"
         self.reply({"message":{"content":json.dumps(result)}})
 
-def drawing(path, nums):
+def drawing(path, nums, designation="AB.001"):
     path.parent.mkdir(parents=True,exist_ok=True)
     c=canvas.Canvas(str(path))
     for n in nums:
-        c.drawString(100,200,f"AB.001 / sheet {n}")
+        c.drawString(100,200,f"{designation} / sheet {n}")
         c.showPage()
     c.save()
 
@@ -61,12 +61,16 @@ with tempfile.TemporaryDirectory() as temp:
     drawing(src/"AB.001(3).pdf",[2])
     Image.new("RGB",(300,200),"white").save(src/"CD.003.pdf")
     Image.new("RGB",(300,200),"white").save(src/"EF.004.pdf")
+    drawing(src/"GH.005.pdf", [1], "GH.005")
+    drawing(src/"GH.005(2).pdf", [2], "GH.005")
     Image.new("RGB",(300,200),"white").save(src/"ББ.002.pdf")
     server.queue=[
         (2,None,"AB.001","short"),
         (1,4,"AB.001","full_drawing"),
         (None,1,"CD.003","specification"),
         (None,2,"EF.004","specification"),
+        (2,None,"GH.005","other"),
+        (1,2,"GH.005","specification"),
         (None,1,"ББ.002","full_drawing"),
     ]
     cmd("scan","--source",str(src))
@@ -81,12 +85,16 @@ with tempfile.TemporaryDirectory() as temp:
     assert spec["Замечания распознавания"]==""
     ambiguous_spec=next(r for r in pages if r["Из имени"]=="EF.004")
     assert ambiguous_spec["Принятый лист"]=="" and ambiguous_spec["Замечания распознавания"]
+    pair = [r for r in pages if r["Из имени"] == "GH.005"]
+    assert len(pair) == 2 and all(not r["Замечания распознавания"] for r in pair)
     assert read("Комплекты")[0]["Пропуски до известной границы"]=="3, 4"
     cmd("merge","--yes")
     assembled=list(job.rglob("*.pdf"))
-    assert len(assembled)==2
+    assert len(assembled)==3
     assert any("ББ.002" in path.name for path in assembled)
     assert len(PdfReader(next(path for path in assembled if "CD.003" in path.name)).pages)==1
+    two_sheet = PdfReader(next(path for path in assembled if "GH.005" in path.name))
+    assert [page.extract_text().strip() for page in two_sheet.pages] == ["GH.005 / sheet 1", "GH.005 / sheet 2"]
     cmd("review","--id",pid,answers=["д","","","","Проверено по штампу"])
     drawing(src/"more"/"AB.001.pdf",[3,4])
     server.queue=[(3,None,"AB.001","short"),(4,None,"AB.001","short")]
@@ -104,5 +112,5 @@ with tempfile.TemporaryDirectory() as temp:
     else:
         raise AssertionError("stale source accepted")
     server.shutdown()
-print("PASS: scanned / vector, missing, suffix mismatch, blank sheet in drawings and specifications, review, resume, multipage, order, stale hash")
+print("PASS: scanned / vector, missing, suffix mismatch, blank sheet, alternate stamp types, review, resume, multipage, order, stale hash")
 
